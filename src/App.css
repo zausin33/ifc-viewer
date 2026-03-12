@@ -1,0 +1,309 @@
+.app {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.ifc-viewer-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.ifc-viewer-container {
+  width: 100%;
+  height: 100%;
+  min-height: 100vh;
+}
+
+.ifc-viewer-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 1rem 1.5rem;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  border-radius: 8px;
+  font-size: 1rem;
+  pointer-events: none;
+}
+
+.ifc-viewer-error {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 1rem 1.5rem;
+  background: #c00;
+  color: #fff;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  max-width: 90%;
+}
+
+/* ─── Marker System ─────────────────────────────────────────────────────── */
+
+.marker-toggle-btn {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(20, 20, 30, 0.78);
+  color: #e0e0e0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition:
+    background 0.2s,
+    border-color 0.2s,
+    color 0.2s;
+  user-select: none;
+}
+
+.marker-toggle-btn:hover {
+  background: rgba(40, 40, 60, 0.9);
+  border-color: rgba(255, 255, 255, 0.45);
+  color: #fff;
+}
+
+.marker-toggle-btn--active {
+  background: rgba(220, 50, 50, 0.85);
+  border-color: #ff6b6b;
+  color: #fff;
+}
+
+.marker-toggle-btn--active:hover {
+  background: rgba(200, 40, 40, 0.95);
+  border-color: #ff8888;
+}
+
+.marker-hint {
+  position: absolute;
+  bottom: 1.25rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 0.45rem 1rem;
+  border-radius: 6px;
+  background: rgba(20, 20, 30, 0.78);
+  color: #ccc;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+
+/* ─── Sketch Viewer ─────────────────────────────────────────────────────── */
+
+.sketch-toggle-btn {
+  position: absolute;
+  top: 4rem;
+  right: 1rem;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(20, 20, 30, 0.78);
+  color: #e0e0e0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition:
+    background 0.2s,
+    border-color 0.2s,
+    color 0.2s;
+  user-select: none;
+}
+
+.sketch-toggle-btn:hover {
+  background: rgba(40, 40, 60, 0.9);
+  border-color: rgba(255, 255, 255, 0.45);
+  color: #fff;
+}
+
+.sketch-toggle-btn--active {
+  background: rgba(30, 90, 190, 0.85);
+  border-color: #5599ff;
+  color: #fff;
+}
+
+.sketch-toggle-btn--active:hover {
+  background: rgba(20, 70, 170, 0.95);
+  border-color: #77aaff;
+}
+
+/* Side panel */
+.sketch-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: rgba(14, 16, 24, 0.96);
+  backdrop-filter: blur(12px);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  transform: translateX(100%);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+.sketch-panel--open {
+  transform: translateX(0);
+  pointer-events: all;
+}
+
+.sketch-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 1rem;
+  font-weight: 600;
+  color: #e8e8e8;
+  flex-shrink: 0;
+}
+
+.sketch-panel-close {
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+
+.sketch-panel-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sketch-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.sketch-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #888;
+  line-height: 1.5;
+}
+
+.sketch-generate-btn {
+  width: 100%;
+  padding: 0.65rem 1rem;
+  border: 2px solid rgba(85, 153, 255, 0.5);
+  border-radius: 8px;
+  background: rgba(30, 90, 190, 0.3);
+  color: #aaccff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    border-color 0.2s,
+    color 0.2s;
+}
+
+.sketch-generate-btn:hover:not(:disabled) {
+  background: rgba(30, 90, 190, 0.55);
+  border-color: #77aaff;
+  color: #fff;
+}
+
+.sketch-generate-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Individual view sections */
+.sketch-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sketch-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.sketch-section-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #ccc;
+  letter-spacing: 0.01em;
+}
+
+.sketch-save-btn {
+  flex-shrink: 0;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #bbb;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.sketch-save-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.sketch-image-container {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #111;
+  min-height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sketch-image {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.sketch-placeholder {
+  font-size: 0.78rem;
+  color: #555;
+  text-align: center;
+  padding: 2rem 1rem;
+}

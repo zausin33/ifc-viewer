@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/Jonas/IdeaProjects/ifc-viewer -type f -name \"package.json\" -o -name \"tsconfig.json\" -o -name \"vite.config.*\" -o -name \"webpack.config.*\" -o -name \"README.md\" -o -name \".cursorrules\" -o -name \".cursor\" -o -name \".github\" 2>/dev/null | head -20)"
+    ]
+  }
+}
