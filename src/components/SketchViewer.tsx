@@ -482,7 +482,6 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
       // Use size.y as the base (common to all views).
       const sharedHalfH = size.y / 2;
 
-      // Full-scene side cameras for the abutment center panel
       const leftCam = makeOrthoCamera(box, "left");
       const rightCam = makeOrthoCamera(box, "right");
 
@@ -492,33 +491,45 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
       const rightFrontCropCam = makeWingCropCamera(box, rightClipBox, "front", sharedHalfH);
       const rightBackCropCam = makeWingCropCamera(box, rightClipBox, "back", sharedHalfH);
 
+      // Z-axis clips to separate front from back wing walls
+      const frontZClip = new THREE.Plane(new THREE.Vector3(0, 0, 1), -center.z);  // keeps z >= center.z
+      const backZClip = new THREE.Plane(new THREE.Vector3(0, 0, -1), center.z);   // keeps z <= center.z
+
       // Wing wall crops from front/back views
       const leftFrontCrop = await overlayMarkers(
-        captureView(renderer, scene, leftFrontCropCam, [leftClip]),
-        leftFrontCropCam, markers, [leftClip],
+        captureView(renderer, scene, leftFrontCropCam, [leftClip, frontZClip]),
+        leftFrontCropCam, markers, [leftClip, frontZClip],
       );
       const leftBackCrop = await overlayMarkers(
-        captureView(renderer, scene, leftBackCropCam, [leftClip]),
-        leftBackCropCam, markers, [leftClip],
+        captureView(renderer, scene, leftBackCropCam, [leftClip, backZClip]),
+        leftBackCropCam, markers, [leftClip, backZClip],
       );
       const rightFrontCrop = await overlayMarkers(
-        captureView(renderer, scene, rightFrontCropCam, [rightClip]),
-        rightFrontCropCam, markers, [rightClip],
+        captureView(renderer, scene, rightFrontCropCam, [rightClip, frontZClip]),
+        rightFrontCropCam, markers, [rightClip, frontZClip],
       );
       const rightBackCrop = await overlayMarkers(
-        captureView(renderer, scene, rightBackCropCam, [rightClip]),
-        rightBackCropCam, markers, [rightClip],
+        captureView(renderer, scene, rightBackCropCam, [rightClip, backZClip]),
+        rightBackCropCam, markers, [rightClip, backZClip],
       );
 
       // Abutment side views (full-scene side cameras, center panel)
       // switch left and right cameras, to see abutment on the correct side (from within the bridge)
+      // Clip to abutment X range to exclude wing wall markers:
+      //   leftSideView:  center.x <= x <= leftBoundary
+      //   rightSideView: rightBoundary <= x <= center.x
+      const leftAbutmentEndClip = new THREE.Plane(new THREE.Vector3(-1, 0, 0), leftBoundary);   // keeps x <= leftBoundary
+      const rightAbutmentEndClip = new THREE.Plane(new THREE.Vector3(1, 0, 0), -rightBoundary); // keeps x >= rightBoundary
+
+      const rightSideViewPlanes = [leftClipAbutmentStart, bottomPlanes[0], rightAbutmentEndClip];
       const rightSideView = await overlayMarkers(
-        captureView(renderer, scene, rightCam, [leftClipAbutmentStart, bottomPlanes[0]]),
-        rightCam, markers, [leftClipAbutmentStart, bottomPlanes[0]],
+        captureView(renderer, scene, rightCam, rightSideViewPlanes),
+        rightCam, markers, rightSideViewPlanes,
       );
+      const leftSideViewPlanes = [rightClipAbutmentStart, bottomPlanes[0], leftAbutmentEndClip];
       const leftSideView = await overlayMarkers(
-        captureView(renderer, scene, leftCam, [rightClipAbutmentStart, bottomPlanes[0]]),
-        leftCam, markers, [rightClipAbutmentStart, bottomPlanes[0]],
+        captureView(renderer, scene, leftCam, leftSideViewPlanes),
+        leftCam, markers, leftSideViewPlanes,
       );
 
       // Left wing sheet: proportional panel widths based on real-world dimensions
