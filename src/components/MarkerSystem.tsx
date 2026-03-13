@@ -28,6 +28,7 @@ interface MarkerSystemProps {
   fragmentsRef: MutableRefObject<OBC.FragmentsManager | null>;
   containerRef: MutableRefObject<HTMLDivElement | null>;
   active: boolean;
+  markersRef: MutableRefObject<THREE.Mesh[]>;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -45,9 +46,8 @@ export default function MarkerSystem({
   fragmentsRef,
   containerRef,
   active,
+  markersRef,
 }: MarkerSystemProps) {
-  // Persisted refs so markers survive active toggling
-  const markersRef = useRef<THREE.Mesh[]>([]);
   const dragState = useRef<{
     marker: THREE.Mesh | null;
     dragging: boolean;

@@ -18,10 +18,18 @@ interface SketchImages {
   back: string | null;
   leftWing: string | null;
   rightWing: string | null;
+
+  leftFrontCrop: string | null;
+  leftBackCrop: string | null;
+  rightFrontCrop: string | null;
+  rightBackCrop: string | null;
+  leftSideView: string | null;
+  rightSideView: string | null;
 }
 
 export interface SketchViewerProps {
   worldRef: MutableRefObject<WorldLike | null>;
+  markersRef: MutableRefObject<THREE.Mesh[]>;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -58,7 +66,7 @@ const makeOrthoCamera = (
   box.getCenter(center);
 
   const aspect = CAPTURE_W / CAPTURE_H;
-  const MARGIN = 1.08;
+  const MARGIN = 1;
 
   let eye: THREE.Vector3;
   let up: THREE.Vector3;
@@ -115,6 +123,113 @@ const makeOrthoCamera = (
   cam.lookAt(center);
   cam.updateProjectionMatrix();
   return cam;
+};
+
+/**
+ * Build an ortho camera for a front/back wing crop that tightly frames
+ * the clip region horizontally, and uses a shared halfH for uniform
+ * vertical scale across all panels in the wing sheet.
+ */
+const makeWingCropCamera = (
+  fullBox: THREE.Box3,
+  clipBox: THREE.Box3,
+  direction: "front" | "back",
+  sharedHalfH: number,
+): THREE.OrthographicCamera => {
+  const fullSize = new THREE.Vector3();
+  const clipSize = new THREE.Vector3();
+  const clipCenter = new THREE.Vector3();
+  const fullCenter = new THREE.Vector3();
+  fullBox.getSize(fullSize);
+  clipBox.getSize(clipSize);
+  clipBox.getCenter(clipCenter);
+  fullBox.getCenter(fullCenter);
+
+  // Frame the wing's X extent tightly, use shared halfH for uniform Y scale
+  const wingAspect = CAPTURE_W / CAPTURE_H;
+  const halfW = Math.max(clipSize.x / 2, sharedHalfH * wingAspect);
+  const halfH = sharedHalfH;
+
+  let eye: THREE.Vector3;
+  if (direction === "front") {
+    eye = new THREE.Vector3(clipCenter.x, fullCenter.y, fullBox.max.z + fullSize.z * 2);
+  } else {
+    eye = new THREE.Vector3(clipCenter.x, fullCenter.y, fullBox.min.z - fullSize.z * 2);
+  }
+  const lookAt = new THREE.Vector3(clipCenter.x, fullCenter.y, fullCenter.z);
+
+  const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 200000);
+  cam.position.copy(eye);
+  cam.up.set(0, 1, 0);
+  cam.lookAt(lookAt);
+  cam.updateProjectionMatrix();
+  return cam;
+};
+
+/**
+ * Overlay marker positions onto a captured view image.
+ * Projects 3D marker positions through the camera to pixel coords,
+ * then draws red dots on a canvas copy of the image.
+ */
+const overlayMarkers = (
+  dataUrl: string,
+  camera: THREE.OrthographicCamera,
+  markers: THREE.Mesh[],
+  clippingPlanes: THREE.Plane[],
+  width: number = CAPTURE_W,
+  height: number = CAPTURE_H,
+): Promise<string> => {
+  if (markers.length === 0) return Promise.resolve(dataUrl);
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const viewProjection = new THREE.Matrix4();
+      viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+
+      for (const marker of markers) {
+        const pos = marker.position.clone();
+
+        // Check if the marker is clipped by any clipping plane
+        let clipped = false;
+        for (const plane of clippingPlanes) {
+          if (plane.distanceToPoint(pos) < 0) {
+            clipped = true;
+            break;
+          }
+        }
+        if (clipped) continue;
+
+        // Project to NDC
+        const ndc = pos.applyMatrix4(viewProjection);
+
+        // NDC to pixel coords
+        const px = ((ndc.x + 1) / 2) * width;
+        const py = ((1 - ndc.y) / 2) * height;
+
+        // Skip if outside the viewport
+        if (px < 0 || px > width || py < 0 || py > height) continue;
+
+        // Draw marker dot
+        ctx.beginPath();
+        ctx.arc(px, py, 8, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255, 68, 68, 0.9)";
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.src = dataUrl;
+  });
 };
 
 /**
@@ -178,37 +293,36 @@ const captureView = (
 };
 
 /**
- * Composite three elevation images seamlessly into a single wing sheet,
- * like an unfolded paper drawing — no separator lines between panels.
+ * Composite three elevation images into a single wing sheet (unfolded paper).
+ * Panel widths are proportional to their real-world widths so scale is uniform.
  *
- *  Left wing:  [front-face left-crop] · [left side view, mirrored] · [back-face left-crop]
- *  Right wing: [back-face right-crop] · [right side view, mirrored] · [front-face right-crop]
- *
- * The side view is always mirrored so the fold edge (where it adjoins the
- * abutment face crop) falls on the correct side of the panel.
- *
- * @param panels   Three data-URLs: [left panel, center panel, right panel]
- * @param labels   Three short label strings shown at the top of each panel
- * @param mirrors  Whether to horizontally flip each panel [left, center, right]
+ * @param panels       Three data-URLs: [left panel, center panel, right panel]
+ * @param labels       Three short label strings shown at the top of each panel
+ * @param mirrors      Whether to horizontally flip each panel
+ * @param worldWidths  Real-world widths [left, center, right] — used to compute proportional pixel widths
  */
 const composeWing = (
   panels: [string, string, string],
   labels: [string, string, string],
   mirrors: [boolean, boolean, boolean],
+  worldWidths: [number, number, number],
 ): Promise<string> => {
   return new Promise((resolve) => {
     const NUM = 3;
-    const PANEL_W = Math.round(CAPTURE_W / NUM);
-    const H = CAPTURE_H;
-    const FULL_W = PANEL_W * NUM;
+    const totalWorld = worldWidths[0] + worldWidths[1] + worldWidths[2];
+    const panelWidths = worldWidths.map((w) => Math.round((w / totalWorld) * CAPTURE_W));
+    // Scale each panel's height to preserve the source aspect ratio (CAPTURE_W x CAPTURE_H)
+    const panelHeights = panelWidths.map((pw) => Math.round((pw / CAPTURE_W) * CAPTURE_H));
+    const FULL_W = panelWidths[0] + panelWidths[1] + panelWidths[2];
+    const FULL_H = Math.max(...panelHeights);
 
     const canvas = document.createElement("canvas");
     canvas.width = FULL_W;
-    canvas.height = H;
+    canvas.height = FULL_H;
     const ctx = canvas.getContext("2d")!;
 
     ctx.fillStyle = "#fafafa";
-    ctx.fillRect(0, 0, FULL_W, H);
+    ctx.fillRect(0, 0, FULL_W, FULL_H);
 
     let loaded = 0;
     const done = () => {
@@ -221,36 +335,43 @@ const composeWing = (
       ctx.fillStyle = "#222";
       ctx.font = "bold 14px sans-serif";
       ctx.textAlign = "center";
+      let labelX = 0;
       for (let i = 0; i < NUM; i++) {
-        ctx.fillText(labels[i], PANEL_W * i + PANEL_W / 2, 20);
+        ctx.fillText(labels[i], labelX + panelWidths[i] / 2, 20);
+        labelX += panelWidths[i];
       }
 
       resolve(canvas.toDataURL("image/png"));
     };
 
+    let dstX = 0;
     panels.forEach((dataUrl, i) => {
       const img = new Image();
-      const dstX = PANEL_W * i;
+      const x = dstX;
+      const pw = panelWidths[i];
+      const ph = panelHeights[i];
       img.onload = () => {
+        const yOffset = (FULL_H - ph) / 2;
         ctx.save();
         if (mirrors[i]) {
-          ctx.translate(dstX + PANEL_W, 0);
+          ctx.translate(x + pw, yOffset);
           ctx.scale(-1, 1);
-          ctx.drawImage(img, 0, 0, PANEL_W, H);
+          ctx.drawImage(img, 0, 0, pw, ph);
         } else {
-          ctx.drawImage(img, dstX, 0, PANEL_W, H);
+          ctx.drawImage(img, x, yOffset, pw, ph);
         }
         ctx.restore();
         done();
       };
       img.src = dataUrl;
+      dstX += pw;
     });
   });
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function SketchViewer({ worldRef }: SketchViewerProps) {
+export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [images, setImages] = useState<SketchImages>({
@@ -260,6 +381,13 @@ export default function SketchViewer({ worldRef }: SketchViewerProps) {
     back: null,
     leftWing: null,
     rightWing: null,
+
+    leftFrontCrop: null,
+    leftBackCrop: null,
+    rightFrontCrop: null,
+    rightBackCrop: null,
+    leftSideView: null,
+    rightSideView: null,
   });
 
   const generate = useCallback(async () => {
@@ -282,76 +410,131 @@ export default function SketchViewer({ worldRef }: SketchViewerProps) {
       const center = new THREE.Vector3();
       box.getCenter(center);
       console.log("Scene bounds:", { box, size, center });
+      const markers = markersRef.current;
+
+      const UPPER_LOWER_BORDER_Y = 0
+      
       // ── 1. Draufsicht (Top View) ────────────────────────────────────────
-      // Camera looks straight down; clip at 80% height to show the cross-section
       const topCam = makeOrthoCamera(box, "top");
-      const topClipY = box.min.y + size.y * 0.8;
-      const topPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), topClipY);
-      const topDataUrl = captureView(renderer, scene, topCam, [topPlane]);
+      const topPlanes = [
+        new THREE.Plane(new THREE.Vector3(0, 1, 0), UPPER_LOWER_BORDER_Y)
+      ];
+      const topDataUrl = await overlayMarkers(
+        captureView(renderer, scene, topCam, topPlanes),
+        topCam, markers, topPlanes,
+      );
 
       // ── 2. Untersicht (Bottom View) ────────────────────────────
-      // Camera looks straight up; clip at 25% height to reveal the Bottom
       const bottomCam = makeOrthoCamera(box, "bottom");
-      const bottomClipY = box.min.y + size.y * 0.25;
-      const bottomPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -bottomClipY);
-      const bottomDataUrl = captureView(renderer, scene, bottomCam, [bottomPlane]);
+      const bottomPlanes = [new THREE.Plane(new THREE.Vector3(0, -1, 0), UPPER_LOWER_BORDER_Y)];
+      const bottomDataUrl = await overlayMarkers(
+        captureView(renderer, scene, bottomCam, bottomPlanes),
+        bottomCam, markers, bottomPlanes,
+      );
 
       // ── 3. Full abutment face views (no lateral clipping) ───────────────
       const frontCam = makeOrthoCamera(box, "front");
       const backCam = makeOrthoCamera(box, "back");
-      const frontDataUrl = captureView(renderer, scene, frontCam, []);
-      const backDataUrl = captureView(renderer, scene, backCam, []);
+      const frontDataUrl = await overlayMarkers(
+        captureView(renderer, scene, frontCam, []),
+        frontCam, markers, [],
+      );
+      const backDataUrl = await overlayMarkers(
+        captureView(renderer, scene, backCam, []),
+        backCam, markers, [],
+      );
 
       // ── 4. Wing views — unfolded paperwork sheets ──────────────────────
-      // Each sheet is 3 panels composited seamlessly (no divider lines):
+      // Each sheet is 3 panels composited seamlessly:
+      //   Left wing:  [front-face left-crop] · [left side (abutment)] · [back-face left-crop]
+      //   Right wing: [back-face right-crop] · [right side (abutment)] · [front-face right-crop]
       //
-      //   Left wing:  [front-face left-crop] · [left side, mirrored] · [back-face left-crop]
-      //   Right wing: [back-face right-crop] · [right side, mirrored] · [front-face right-crop]
-      //
-      // Mirroring the side view ensures the fold geometry is continuous at
-      // both seams (front-face and back-face neighbours).
-      //
-      // X clip: ±30 % of full span → excludes the hollow abutment interior.
-      const wingHalfX = -4;
-      const leftBoundary = center.x - wingHalfX; // keeps x ≤ this value
-      const rightBoundary = center.x + wingHalfX; // keeps x ≥ this value
+      // The abutment side view is the CENTER panel.
+      // The wing wall crops (from front/back face views) are folded out on each side.
+      const wingOffset = 4;
+      const leftBoundary = center.x + wingOffset;
+      const rightBoundary = center.x - wingOffset;
+
+      const leftClipAbutmentStart = new THREE.Plane(new THREE.Vector3(-1, 0, 0), center.x);
+      const rightClipAbutmentStart = new THREE.Plane(new THREE.Vector3(1, 0, 0), -center.x);
 
       const leftClip = new THREE.Plane(new THREE.Vector3(1, 0, 0), -leftBoundary);
       const rightClip = new THREE.Plane(new THREE.Vector3(-1, 0, 0), rightBoundary);
 
+      // Clip sub-regions matching what the clip planes KEEP:
+      // leftClip keeps x ≥ leftBoundary → frame from leftBoundary to box.max.x
+      // rightClip keeps x ≤ rightBoundary → frame from box.min.x to rightBoundary
+      const leftClipBox = new THREE.Box3(
+        new THREE.Vector3(leftBoundary, box.min.y, box.min.z),
+        new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+      );
+      const rightClipBox = new THREE.Box3(
+        new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+        new THREE.Vector3(rightBoundary, box.max.y, box.max.z),
+      );
+
+      // Real-world widths for proportional panel sizing
+      const leftWingWidth = box.max.x - leftBoundary;   // X extent of left wing
+      const rightWingWidth = rightBoundary - box.min.x;  // X extent of right wing
+      const abutmentDepth = size.z;                       // Z depth = side view width
+
+      // Shared vertical scale: all cameras use the same halfH so Y scale is uniform.
+      // Use size.y as the base (common to all views).
+      const sharedHalfH = size.y / 2;
+
+      // Full-scene side cameras for the abutment center panel
       const leftCam = makeOrthoCamera(box, "left");
       const rightCam = makeOrthoCamera(box, "right");
 
-      // Abutment face crops (only wing region visible)
-      const leftFrontCrop = captureView(renderer, scene, frontCam, [leftClip]);
-      const leftBackCrop = captureView(renderer, scene, backCam, [leftClip]);
-      const rightFrontCrop = captureView(renderer, scene, frontCam, [rightClip]);
-      const rightBackCrop = captureView(renderer, scene, backCam, [rightClip]);
+      // Wing crop cameras: tight framing on wing X, shared halfH for uniform Y scale
+      const leftFrontCropCam = makeWingCropCamera(box, leftClipBox, "front", sharedHalfH);
+      const leftBackCropCam = makeWingCropCamera(box, leftClipBox, "back", sharedHalfH);
+      const rightFrontCropCam = makeWingCropCamera(box, rightClipBox, "front", sharedHalfH);
+      const rightBackCropCam = makeWingCropCamera(box, rightClipBox, "back", sharedHalfH);
 
-      // Side end-face views (only wing region visible)
-      const leftSideView = captureView(renderer, scene, leftCam, [leftClip]);
-      const rightSideView = captureView(renderer, scene, rightCam, [rightClip]);
+      // Wing wall crops from front/back views
+      const leftFrontCrop = await overlayMarkers(
+        captureView(renderer, scene, leftFrontCropCam, [leftClip]),
+        leftFrontCropCam, markers, [leftClip],
+      );
+      const leftBackCrop = await overlayMarkers(
+        captureView(renderer, scene, leftBackCropCam, [leftClip]),
+        leftBackCropCam, markers, [leftClip],
+      );
+      const rightFrontCrop = await overlayMarkers(
+        captureView(renderer, scene, rightFrontCropCam, [rightClip]),
+        rightFrontCropCam, markers, [rightClip],
+      );
+      const rightBackCrop = await overlayMarkers(
+        captureView(renderer, scene, rightBackCropCam, [rightClip]),
+        rightBackCropCam, markers, [rightClip],
+      );
 
-      // Left wing sheet
-      // Panel order:  front-crop (no mirror) · left-side (mirrored) · back-crop (no mirror)
-      // Why mirror side: left-cam looks in +X → front(+Z) is on screen-RIGHT;
-      // mirroring puts front on screen-LEFT so it adjoins the right edge of the
-      // front-crop, and back on screen-RIGHT to adjoin the left edge of the back-crop.
+      // Abutment side views (full-scene side cameras, center panel)
+      // switch left and right cameras, to see abutment on the correct side (from within the bridge)
+      const rightSideView = await overlayMarkers(
+        captureView(renderer, scene, rightCam, [leftClipAbutmentStart, bottomPlanes[0]]),
+        rightCam, markers, [leftClipAbutmentStart, bottomPlanes[0]],
+      );
+      const leftSideView = await overlayMarkers(
+        captureView(renderer, scene, leftCam, [rightClipAbutmentStart, bottomPlanes[0]]),
+        leftCam, markers, [rightClipAbutmentStart, bottomPlanes[0]],
+      );
+
+      // Left wing sheet: proportional panel widths based on real-world dimensions
       const leftWingDataUrl = await composeWing(
-        [leftFrontCrop, leftSideView, leftBackCrop],
-        ["Stirnwand vorne (links)", "Flügelwand links", "Stirnwand hinten (links)"],
-        [true, true, true],
+        [leftBackCrop, leftSideView, leftFrontCrop],
+        ["Flügel vorne (links)", "Widerlager links", "Flügel hinten (links)"],
+        [false, false, false],
+        [leftWingWidth, abutmentDepth, leftWingWidth],
       );
 
       // Right wing sheet
-      // Panel order:  back-crop (no mirror) · right-side (mirrored) · front-crop (no mirror)
-      // Why mirror side: right-cam looks in -X → back(-Z) is on screen-RIGHT;
-      // mirroring puts back on screen-LEFT so it adjoins the right edge of the
-      // back-crop, and front on screen-RIGHT to adjoin the left edge of the front-crop.
       const rightWingDataUrl = await composeWing(
-        [rightBackCrop, rightSideView, rightFrontCrop],
-        ["Stirnwand hinten (rechts)", "Flügelwand rechts", "Stirnwand vorne (rechts)"],
-        [true, true, true],
+        [rightFrontCrop, rightSideView, rightBackCrop],
+        ["Flügel hinten (rechts)", "Widerlager rechts", "Flügel vorne (rechts)"],
+        [false, false, false],
+        [rightWingWidth, abutmentDepth, rightWingWidth],
       );
 
       setImages({
@@ -361,11 +544,20 @@ export default function SketchViewer({ worldRef }: SketchViewerProps) {
         back: backDataUrl,
         leftWing: leftWingDataUrl,
         rightWing: rightWingDataUrl,
+
+        leftFrontCrop: leftFrontCrop,
+        leftBackCrop: leftBackCrop,
+        rightFrontCrop: rightFrontCrop,
+        rightBackCrop: rightBackCrop,
+  
+        // Abutment side views (full-scene side cameras, center panel)
+        leftSideView: leftSideView,
+        rightSideView: rightSideView,
       });
     } finally {
       setIsGenerating(false);
     }
-  }, [worldRef]);
+  }, [worldRef, markersRef]);
 
   const savePng = (dataUrl: string, fileName: string) => {
     const a = document.createElement("a");
@@ -396,6 +588,37 @@ export default function SketchViewer({ worldRef }: SketchViewerProps) {
       key: "rightWing" as const,
       label: "Rechte Flügelwand – Abgewickelt (Right Wing Unfolded)",
       file: "fluegel-rechts.png",
+    },
+
+    {
+      key: "leftFrontCrop" as const,
+      label: "Linke Flügelwand – Vorne (Left Wing Front Crop)",
+      file: "fluegel-links-vorne.png",
+    },
+    {
+      key: "leftBackCrop" as const,
+      label: "Linke Flügelwand – Hinten (Left Wing Back Crop)",
+      file: "fluegel-links-hinten.png",
+    },
+    {
+      key: "rightFrontCrop" as const,
+      label: "Rechte Flügelwand – Vorne (Right Wing Front Crop)",
+      file: "fluegel-rechts-vorne.png",
+    },
+    {
+      key: "rightBackCrop" as const,
+      label: "Rechte Flügelwand – Hinten (Right Wing Back Crop)",
+      file: "fluegel-rechts-hinten.png",
+    },
+    {
+      key: "leftSideView" as const,
+      label: "Linke Flügelwand – Seite (Left Wing Side View)",
+      file: "fluegel-links-seite.png",
+    },
+    {
+      key: "rightSideView" as const,
+      label: "Rechte Flügelwand – Seite (Right Wing Side View)",
+      file: "fluegel-rechts-seite.png",
     },
   ];
 

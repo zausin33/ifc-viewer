@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import Stats from "stats.js";
 import MarkerSystem, { type WorldLike } from "./MarkerSystem";
@@ -17,6 +18,7 @@ export default function IFCViewer() {
   // Refs to Three.js/OBC objects so MarkerSystem can access them after mount
   const worldRef = useRef<WorldLike | null>(null);
   const fragmentsRef = useRef<OBC.FragmentsManager | null>(null);
+  const markersRef = useRef<THREE.Mesh[]>([]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -149,10 +151,11 @@ export default function IFCViewer() {
         fragmentsRef={fragmentsRef}
         containerRef={containerRef}
         active={isMarkerMode}
+        markersRef={markersRef}
       />
 
       {/* Sketch views panel */}
-      <SketchViewer worldRef={worldRef} />
+      <SketchViewer worldRef={worldRef} markersRef={markersRef} />
 
       {loading && <div className="ifc-viewer-loading">Loading IFC model…</div>}
       {error && <div className="ifc-viewer-error">{error}</div>}

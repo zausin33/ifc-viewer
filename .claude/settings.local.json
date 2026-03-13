@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find /c/Users/Jonas/IdeaProjects/ifc-viewer -type f -name \"package.json\" -o -name \"tsconfig.json\" -o -name \"vite.config.*\" -o -name \"webpack.config.*\" -o -name \"README.md\" -o -name \".cursorrules\" -o -name \".cursor\" -o -name \".github\" 2>/dev/null | head -20)"
+      "Bash(find /c/Users/Jonas/IdeaProjects/ifc-viewer -type f -name \"package.json\" -o -name \"tsconfig.json\" -o -name \"vite.config.*\" -o -name \"webpack.config.*\" -o -name \"README.md\" -o -name \".cursorrules\" -o -name \".cursor\" -o -name \".github\" 2>/dev/null | head -20)",
+      "Bash(npm run:*)",
+      "WebFetch(domain:docs.thatopen.com)",
+      "Bash(find c:/Users/Jonas/IdeaProjects/ifc-viewer/node_modules/@thatopen/components -name *.d.ts -type f)",
+      "WebSearch",
+      "Bash(grep -r \"View\\\\|view\" c:/Users/Jonas/IdeaProjects/ifc-viewer/src/ --include=*.tsx --include=*.ts)"
     ]
   }
 }
