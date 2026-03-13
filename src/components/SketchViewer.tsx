@@ -1,7 +1,16 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import type { MutableRefObject } from "react";
 import * as THREE from "three";
+import * as OBC from "@thatopen/components";
 import type { WorldLike } from "./MarkerSystem";
+
+interface FragmentModelLike {
+  raycast(data: {
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    mouse: THREE.Vector2;
+    dom: HTMLCanvasElement;
+  }): Promise<{ distance: number; point: THREE.Vector3; normal?: THREE.Vector3 } | null>;
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -11,24 +20,48 @@ const BACKGROUND_COLOR = new THREE.Color(0xfafafa);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-interface SketchImages {
-  top: string | null;
-  bottom: string | null;
-  front: string | null;
-  back: string | null;
+interface ViewData {
+  baseImageUrl: string;
+  imageUrl: string;
+  camera: THREE.OrthographicCamera;
+  clippingPlanes: THREE.Plane[];
+}
+
+type ClickableKey =
+  | "top" | "bottom" | "front" | "back"
+  | "leftFrontCrop" | "leftBackCrop" | "rightFrontCrop" | "rightBackCrop"
+  | "leftSideView" | "rightSideView";
+
+interface SketchViewsData {
+  top: ViewData | null;
+  bottom: ViewData | null;
+  front: ViewData | null;
+  back: ViewData | null;
   leftWing: string | null;
   rightWing: string | null;
 
-  leftFrontCrop: string | null;
-  leftBackCrop: string | null;
-  rightFrontCrop: string | null;
-  rightBackCrop: string | null;
-  leftSideView: string | null;
-  rightSideView: string | null;
+  leftFrontCrop: ViewData | null;
+  leftBackCrop: ViewData | null;
+  rightFrontCrop: ViewData | null;
+  rightBackCrop: ViewData | null;
+  leftSideView: ViewData | null;
+  rightSideView: ViewData | null;
+}
+
+interface WingComposeParams {
+  leftPanels: [ClickableKey, ClickableKey, ClickableKey];
+  leftLabels: [string, string, string];
+  leftMirrors: [boolean, boolean, boolean];
+  leftWidths: [number, number, number];
+  rightPanels: [ClickableKey, ClickableKey, ClickableKey];
+  rightLabels: [string, string, string];
+  rightMirrors: [boolean, boolean, boolean];
+  rightWidths: [number, number, number];
 }
 
 export interface SketchViewerProps {
   worldRef: MutableRefObject<WorldLike | null>;
+  fragmentsRef: MutableRefObject<OBC.FragmentsManager | null>;
   markersRef: MutableRefObject<THREE.Mesh[]>;
 }
 
@@ -371,10 +404,10 @@ const composeWing = (
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps) {
+export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: SketchViewerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [images, setImages] = useState<SketchImages>({
+  const [viewsData, setViewsData] = useState<SketchViewsData>({
     top: null,
     bottom: null,
     front: null,
@@ -389,6 +422,7 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
     leftSideView: null,
     rightSideView: null,
   });
+  const wingParamsRef = useRef<WingComposeParams | null>(null);
 
   const generate = useCallback(async () => {
     const world = worldRef.current;
@@ -414,43 +448,35 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
 
       const UPPER_LOWER_BORDER_Y = 0
       
+      // Helper: capture a view and build a ViewData (base + overlaid)
+      const makeViewData = async (
+        cam: THREE.OrthographicCamera,
+        planes: THREE.Plane[],
+      ): Promise<ViewData> => {
+        const baseImageUrl = captureView(renderer, scene, cam, planes);
+        const imageUrl = await overlayMarkers(baseImageUrl, cam, markers, planes);
+        return { baseImageUrl, imageUrl, camera: cam, clippingPlanes: planes };
+      };
+
       // ── 1. Draufsicht (Top View) ────────────────────────────────────────
       const topCam = makeOrthoCamera(box, "top");
       const topPlanes = [
         new THREE.Plane(new THREE.Vector3(0, 1, 0), UPPER_LOWER_BORDER_Y)
       ];
-      const topDataUrl = await overlayMarkers(
-        captureView(renderer, scene, topCam, topPlanes),
-        topCam, markers, topPlanes,
-      );
+      const topVD = await makeViewData(topCam, topPlanes);
 
       // ── 2. Untersicht (Bottom View) ────────────────────────────
       const bottomCam = makeOrthoCamera(box, "bottom");
       const bottomPlanes = [new THREE.Plane(new THREE.Vector3(0, -1, 0), UPPER_LOWER_BORDER_Y)];
-      const bottomDataUrl = await overlayMarkers(
-        captureView(renderer, scene, bottomCam, bottomPlanes),
-        bottomCam, markers, bottomPlanes,
-      );
+      const bottomVD = await makeViewData(bottomCam, bottomPlanes);
 
       // ── 3. Full abutment face views (no lateral clipping) ───────────────
       const frontCam = makeOrthoCamera(box, "front");
       const backCam = makeOrthoCamera(box, "back");
-      const frontDataUrl = await overlayMarkers(
-        captureView(renderer, scene, frontCam, []),
-        frontCam, markers, [],
-      );
-      const backDataUrl = await overlayMarkers(
-        captureView(renderer, scene, backCam, []),
-        backCam, markers, [],
-      );
+      const frontVD = await makeViewData(frontCam, []);
+      const backVD = await makeViewData(backCam, []);
 
       // ── 4. Wing views — unfolded paperwork sheets ──────────────────────
-      // Each sheet is 3 panels composited seamlessly:
-      //   Left wing:  [front-face left-crop] · [left side (abutment)] · [back-face left-crop]
-      //   Right wing: [back-face right-crop] · [right side (abutment)] · [front-face right-crop]
-      //
-      // The abutment side view is the CENTER panel.
-      // The wing wall crops (from front/back face views) are folded out on each side.
       const wingOffset = 4;
       const leftBoundary = center.x + wingOffset;
       const rightBoundary = center.x - wingOffset;
@@ -461,9 +487,6 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
       const leftClip = new THREE.Plane(new THREE.Vector3(1, 0, 0), -leftBoundary);
       const rightClip = new THREE.Plane(new THREE.Vector3(-1, 0, 0), rightBoundary);
 
-      // Clip sub-regions matching what the clip planes KEEP:
-      // leftClip keeps x ≥ leftBoundary → frame from leftBoundary to box.max.x
-      // rightClip keeps x ≤ rightBoundary → frame from box.min.x to rightBoundary
       const leftClipBox = new THREE.Box3(
         new THREE.Vector3(leftBoundary, box.min.y, box.min.z),
         new THREE.Vector3(box.max.x, box.max.y, box.max.z),
@@ -473,102 +496,225 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
         new THREE.Vector3(rightBoundary, box.max.y, box.max.z),
       );
 
-      // Real-world widths for proportional panel sizing
-      const leftWingWidth = box.max.x - leftBoundary;   // X extent of left wing
-      const rightWingWidth = rightBoundary - box.min.x;  // X extent of right wing
-      const abutmentDepth = size.z;                       // Z depth = side view width
+      const leftWingWidth = box.max.x - leftBoundary;
+      const rightWingWidth = rightBoundary - box.min.x;
+      const abutmentDepth = size.z;
 
-      // Shared vertical scale: all cameras use the same halfH so Y scale is uniform.
-      // Use size.y as the base (common to all views).
       const sharedHalfH = size.y / 2;
 
       const leftCam = makeOrthoCamera(box, "left");
       const rightCam = makeOrthoCamera(box, "right");
 
-      // Wing crop cameras: tight framing on wing X, shared halfH for uniform Y scale
       const leftFrontCropCam = makeWingCropCamera(box, leftClipBox, "front", sharedHalfH);
       const leftBackCropCam = makeWingCropCamera(box, leftClipBox, "back", sharedHalfH);
       const rightFrontCropCam = makeWingCropCamera(box, rightClipBox, "front", sharedHalfH);
       const rightBackCropCam = makeWingCropCamera(box, rightClipBox, "back", sharedHalfH);
 
-      // Z-axis clips to separate front from back wing walls
-      const frontZClip = new THREE.Plane(new THREE.Vector3(0, 0, 1), -center.z);  // keeps z >= center.z
-      const backZClip = new THREE.Plane(new THREE.Vector3(0, 0, -1), center.z);   // keeps z <= center.z
+      const frontZClip = new THREE.Plane(new THREE.Vector3(0, 0, 1), -center.z);
+      const backZClip = new THREE.Plane(new THREE.Vector3(0, 0, -1), center.z);
 
-      // Wing wall crops from front/back views
-      const leftFrontCrop = await overlayMarkers(
-        captureView(renderer, scene, leftFrontCropCam, [leftClip, frontZClip]),
-        leftFrontCropCam, markers, [leftClip, frontZClip],
-      );
-      const leftBackCrop = await overlayMarkers(
-        captureView(renderer, scene, leftBackCropCam, [leftClip, backZClip]),
-        leftBackCropCam, markers, [leftClip, backZClip],
-      );
-      const rightFrontCrop = await overlayMarkers(
-        captureView(renderer, scene, rightFrontCropCam, [rightClip, frontZClip]),
-        rightFrontCropCam, markers, [rightClip, frontZClip],
-      );
-      const rightBackCrop = await overlayMarkers(
-        captureView(renderer, scene, rightBackCropCam, [rightClip, backZClip]),
-        rightBackCropCam, markers, [rightClip, backZClip],
-      );
+      const leftFrontCropVD = await makeViewData(leftFrontCropCam, [leftClip, frontZClip]);
+      const leftBackCropVD = await makeViewData(leftBackCropCam, [leftClip, backZClip]);
+      const rightFrontCropVD = await makeViewData(rightFrontCropCam, [rightClip, frontZClip]);
+      const rightBackCropVD = await makeViewData(rightBackCropCam, [rightClip, backZClip]);
 
-      // Abutment side views (full-scene side cameras, center panel)
-      // switch left and right cameras, to see abutment on the correct side (from within the bridge)
-      // Clip to abutment X range to exclude wing wall markers:
-      //   leftSideView:  center.x <= x <= leftBoundary
-      //   rightSideView: rightBoundary <= x <= center.x
-      const leftAbutmentEndClip = new THREE.Plane(new THREE.Vector3(-1, 0, 0), leftBoundary);   // keeps x <= leftBoundary
-      const rightAbutmentEndClip = new THREE.Plane(new THREE.Vector3(1, 0, 0), -rightBoundary); // keeps x >= rightBoundary
+      const leftAbutmentEndClip = new THREE.Plane(new THREE.Vector3(-1, 0, 0), leftBoundary);
+      const rightAbutmentEndClip = new THREE.Plane(new THREE.Vector3(1, 0, 0), -rightBoundary);
 
       const rightSideViewPlanes = [leftClipAbutmentStart, bottomPlanes[0], rightAbutmentEndClip];
-      const rightSideView = await overlayMarkers(
-        captureView(renderer, scene, rightCam, rightSideViewPlanes),
-        rightCam, markers, rightSideViewPlanes,
-      );
+      const rightSideVD = await makeViewData(rightCam, rightSideViewPlanes);
+
       const leftSideViewPlanes = [rightClipAbutmentStart, bottomPlanes[0], leftAbutmentEndClip];
-      const leftSideView = await overlayMarkers(
-        captureView(renderer, scene, leftCam, leftSideViewPlanes),
-        leftCam, markers, leftSideViewPlanes,
-      );
+      const leftSideVD = await makeViewData(leftCam, leftSideViewPlanes);
 
-      // Left wing sheet: proportional panel widths based on real-world dimensions
+      // Store wing composition params for refreshMarkerOverlays
+      wingParamsRef.current = {
+        leftPanels: ["leftBackCrop", "leftSideView", "leftFrontCrop"],
+        leftLabels: ["Flügel vorne (links)", "Widerlager links", "Flügel hinten (links)"],
+        leftMirrors: [false, false, false],
+        leftWidths: [leftWingWidth, abutmentDepth, leftWingWidth],
+        rightPanels: ["rightFrontCrop", "rightSideView", "rightBackCrop"],
+        rightLabels: ["Flügel hinten (rechts)", "Widerlager rechts", "Flügel vorne (rechts)"],
+        rightMirrors: [false, false, false],
+        rightWidths: [rightWingWidth, abutmentDepth, rightWingWidth],
+      };
+
+      // Compose wing sheets from overlaid individual panels
       const leftWingDataUrl = await composeWing(
-        [leftBackCrop, leftSideView, leftFrontCrop],
-        ["Flügel vorne (links)", "Widerlager links", "Flügel hinten (links)"],
-        [false, false, false],
-        [leftWingWidth, abutmentDepth, leftWingWidth],
+        [leftBackCropVD.imageUrl, leftSideVD.imageUrl, leftFrontCropVD.imageUrl],
+        wingParamsRef.current.leftLabels,
+        wingParamsRef.current.leftMirrors,
+        wingParamsRef.current.leftWidths,
       );
-
-      // Right wing sheet
       const rightWingDataUrl = await composeWing(
-        [rightFrontCrop, rightSideView, rightBackCrop],
-        ["Flügel hinten (rechts)", "Widerlager rechts", "Flügel vorne (rechts)"],
-        [false, false, false],
-        [rightWingWidth, abutmentDepth, rightWingWidth],
+        [rightFrontCropVD.imageUrl, rightSideVD.imageUrl, rightBackCropVD.imageUrl],
+        wingParamsRef.current.rightLabels,
+        wingParamsRef.current.rightMirrors,
+        wingParamsRef.current.rightWidths,
       );
 
-      setImages({
-        top: topDataUrl,
-        bottom: bottomDataUrl,
-        front: frontDataUrl,
-        back: backDataUrl,
+      setViewsData({
+        top: topVD,
+        bottom: bottomVD,
+        front: frontVD,
+        back: backVD,
         leftWing: leftWingDataUrl,
         rightWing: rightWingDataUrl,
-
-        leftFrontCrop: leftFrontCrop,
-        leftBackCrop: leftBackCrop,
-        rightFrontCrop: rightFrontCrop,
-        rightBackCrop: rightBackCrop,
-  
-        // Abutment side views (full-scene side cameras, center panel)
-        leftSideView: leftSideView,
-        rightSideView: rightSideView,
+        leftFrontCrop: leftFrontCropVD,
+        leftBackCrop: leftBackCropVD,
+        rightFrontCrop: rightFrontCropVD,
+        rightBackCrop: rightBackCropVD,
+        leftSideView: leftSideVD,
+        rightSideView: rightSideVD,
       });
     } finally {
       setIsGenerating(false);
     }
   }, [worldRef, markersRef]);
+
+  // ── Re-overlay markers on cached base images (fast, no WebGL re-render) ──
+  const refreshMarkerOverlays = useCallback(async () => {
+    setViewsData((prev) => {
+      // Kick off async overlay work, then update state when done
+      (async () => {
+        const markers = markersRef.current;
+        const clickableKeys: ClickableKey[] = [
+          "top", "bottom", "front", "back",
+          "leftFrontCrop", "leftBackCrop", "rightFrontCrop", "rightBackCrop",
+          "leftSideView", "rightSideView",
+        ];
+
+        const updated: Partial<SketchViewsData> = {};
+        for (const key of clickableKeys) {
+          const vd = prev[key] as ViewData | null;
+          if (!vd) continue;
+          const imageUrl = await overlayMarkers(
+            vd.baseImageUrl, vd.camera, markers, vd.clippingPlanes,
+          );
+          updated[key] = { ...vd, imageUrl } as ViewData;
+        }
+
+        // Recomposite wing sheets
+        const wp = wingParamsRef.current;
+        let leftWing = prev.leftWing;
+        let rightWing = prev.rightWing;
+        if (wp) {
+          const getImg = (key: ClickableKey) =>
+            (updated[key] as ViewData | undefined)?.imageUrl
+            ?? (prev[key] as ViewData | null)?.imageUrl
+            ?? "";
+          leftWing = await composeWing(
+            [getImg(wp.leftPanels[0]), getImg(wp.leftPanels[1]), getImg(wp.leftPanels[2])],
+            wp.leftLabels, wp.leftMirrors, wp.leftWidths,
+          );
+          rightWing = await composeWing(
+            [getImg(wp.rightPanels[0]), getImg(wp.rightPanels[1]), getImg(wp.rightPanels[2])],
+            wp.rightLabels, wp.rightMirrors, wp.rightWidths,
+          );
+        }
+
+        setViewsData((curr) => ({
+          ...curr,
+          ...updated,
+          leftWing,
+          rightWing,
+        }));
+      })();
+
+      return prev; // return unchanged for now; async callback will update later
+    });
+  }, [markersRef]);
+
+  // ── Click on a 2D sketch image → place marker in 3D ─────────────────────
+  const handleSketchClick = useCallback(async (
+    event: React.MouseEvent<HTMLImageElement>,
+    vd: ViewData,
+  ) => {
+    const world = worldRef.current;
+    const fragments = fragmentsRef.current;
+    if (!world?.renderer || !fragments) return;
+    const scene = world.scene.three;
+    const dom = world.renderer.three.domElement;
+
+    const imgEl = event.currentTarget;
+    const imgRect = imgEl.getBoundingClientRect();
+
+    // Map display pixel → NDC in the view's orthographic camera space
+    const ndcX = ((event.clientX - imgRect.left) / imgRect.width) * 2 - 1;
+    const ndcY = -(((event.clientY - imgRect.top) / imgRect.height) * 2 - 1);
+
+    // The OBC fragment raycast API expects clientX/clientY screen coords + canvas DOM.
+    // It internally converts: ndc = ((clientX - rect.left) / rect.width) * 2 - 1, etc.
+    // So we reverse that to produce fake clientX/clientY that yield our desired NDC.
+    const canvasRect = dom.getBoundingClientRect();
+    const fakeClientX = canvasRect.left + ((ndcX + 1) / 2) * canvasRect.width;
+    const fakeClientY = canvasRect.top + ((1 - ndcY) / 2) * canvasRect.height;
+    const fakeMouse = new THREE.Vector2(fakeClientX, fakeClientY);
+
+    // For raycasting, reposition the camera just outside the clipping region.
+    // The OBC raycast returns only the CLOSEST hit. If the camera is far away
+    // and geometry outside the clipping region is between the camera and the
+    // subject, that geometry "blocks" the ray. By advancing the camera along
+    // its look direction past any clipping planes it sits on the rejected side
+    // of, the closest hit becomes one within the visible region.
+    const rayCamera = vd.camera.clone();
+    const lookDir = new THREE.Vector3();
+    rayCamera.getWorldDirection(lookDir);
+    if (vd.clippingPlanes.length > 0) {
+      let maxShift = 0;
+      for (const plane of vd.clippingPlanes) {
+        const dist = plane.distanceToPoint(rayCamera.position);
+        if (dist < 0) {
+          // Camera is on the rejected side of this clipping plane.
+          // Compute shift along look direction to cross the plane.
+          const denom = plane.normal.dot(lookDir);
+          if (Math.abs(denom) > 0.001) {
+            const shift = -dist / denom;
+            if (shift > maxShift) maxShift = shift;
+          }
+        }
+      }
+      if (maxShift > 0) {
+        rayCamera.position.addScaledVector(lookDir, maxShift + 1);
+        rayCamera.updateMatrixWorld(true);
+      }
+    }
+
+    // Raycast against all fragment models using the repositioned camera
+    const results: Array<{ distance: number; point: THREE.Vector3 }> = [];
+    for (const [, model] of fragments.list) {
+      const result = await (model as unknown as FragmentModelLike).raycast({
+        camera: rayCamera,
+        mouse: fakeMouse,
+        dom,
+      });
+      if (result) results.push(result);
+    }
+
+    if (results.length === 0) return;
+
+    // Pick closest hit
+    const closest = results.reduce((a, b) => (a.distance < b.distance ? a : b));
+
+    // Check clipping planes — reject if outside visible region
+    for (const plane of vd.clippingPlanes) {
+      if (plane.distanceToPoint(closest.point) < 0) return;
+    }
+
+    // Place marker
+    const geo = new THREE.SphereGeometry(0.3, 16, 16);
+    const mat = new THREE.MeshLambertMaterial({
+      color: "#ff4444",
+      transparent: true,
+      opacity: 0.85,
+    });
+    const sphere = new THREE.Mesh(geo, mat);
+    sphere.position.copy(closest.point);
+    scene.add(sphere);
+    markersRef.current.push(sphere);
+
+    await refreshMarkerOverlays();
+  }, [worldRef, fragmentsRef, markersRef, refreshMarkerOverlays]);
 
   const savePng = (dataUrl: string, fileName: string) => {
     const a = document.createElement("a");
@@ -577,60 +723,19 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
     a.click();
   };
 
-  const VIEWS = [
-    { key: "top" as const, label: "Draufsicht (Top View)", file: "draufsicht.png" },
-    { key: "bottom" as const, label: "Untersicht (Bottom View)", file: "untersicht.png" },
-    {
-      key: "front" as const,
-      label: "Stirnwand – Vorderseite (Front Face)",
-      file: "stirnwand-vorne.png",
-    },
-    {
-      key: "back" as const,
-      label: "Stirnwand – Rückseite (Back Face)",
-      file: "stirnwand-hinten.png",
-    },
-    {
-      key: "leftWing" as const,
-      label: "Linke Flügelwand – Abgewickelt (Left Wing Unfolded)",
-      file: "fluegel-links.png",
-    },
-    {
-      key: "rightWing" as const,
-      label: "Rechte Flügelwand – Abgewickelt (Right Wing Unfolded)",
-      file: "fluegel-rechts.png",
-    },
-
-    {
-      key: "leftFrontCrop" as const,
-      label: "Linke Flügelwand – Vorne (Left Wing Front Crop)",
-      file: "fluegel-links-vorne.png",
-    },
-    {
-      key: "leftBackCrop" as const,
-      label: "Linke Flügelwand – Hinten (Left Wing Back Crop)",
-      file: "fluegel-links-hinten.png",
-    },
-    {
-      key: "rightFrontCrop" as const,
-      label: "Rechte Flügelwand – Vorne (Right Wing Front Crop)",
-      file: "fluegel-rechts-vorne.png",
-    },
-    {
-      key: "rightBackCrop" as const,
-      label: "Rechte Flügelwand – Hinten (Right Wing Back Crop)",
-      file: "fluegel-rechts-hinten.png",
-    },
-    {
-      key: "leftSideView" as const,
-      label: "Linke Flügelwand – Seite (Left Wing Side View)",
-      file: "fluegel-links-seite.png",
-    },
-    {
-      key: "rightSideView" as const,
-      label: "Rechte Flügelwand – Seite (Right Wing Side View)",
-      file: "fluegel-rechts-seite.png",
-    },
+  const VIEWS: { key: keyof SketchViewsData; label: string; file: string; clickable: boolean }[] = [
+    { key: "top", label: "Draufsicht (Top View)", file: "draufsicht.png", clickable: true },
+    { key: "bottom", label: "Untersicht (Bottom View)", file: "untersicht.png", clickable: true },
+    { key: "front", label: "Stirnwand – Vorderseite (Front Face)", file: "stirnwand-vorne.png", clickable: true },
+    { key: "back", label: "Stirnwand – Rückseite (Back Face)", file: "stirnwand-hinten.png", clickable: true },
+    { key: "leftWing", label: "Linke Flügelwand – Abgewickelt (Left Wing Unfolded)", file: "fluegel-links.png", clickable: false },
+    { key: "rightWing", label: "Rechte Flügelwand – Abgewickelt (Right Wing Unfolded)", file: "fluegel-rechts.png", clickable: false },
+    { key: "leftFrontCrop", label: "Linke Flügelwand – Vorne (Left Wing Front Crop)", file: "fluegel-links-vorne.png", clickable: true },
+    { key: "leftBackCrop", label: "Linke Flügelwand – Hinten (Left Wing Back Crop)", file: "fluegel-links-hinten.png", clickable: true },
+    { key: "rightFrontCrop", label: "Rechte Flügelwand – Vorne (Right Wing Front Crop)", file: "fluegel-rechts-vorne.png", clickable: true },
+    { key: "rightBackCrop", label: "Rechte Flügelwand – Hinten (Right Wing Back Crop)", file: "fluegel-rechts-hinten.png", clickable: true },
+    { key: "leftSideView", label: "Linke Flügelwand – Seite (Left Wing Side View)", file: "fluegel-links-seite.png", clickable: true },
+    { key: "rightSideView", label: "Rechte Flügelwand – Seite (Right Wing Side View)", file: "fluegel-rechts-seite.png", clickable: true },
   ];
 
   return (
@@ -660,23 +765,29 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
         <div className="sketch-panel-body">
           <p className="sketch-hint">
             Renders orthographic cross-sections from the loaded model using the main renderer. Make
-            sure the model is fully loaded before generating.
+            sure the model is fully loaded before generating. Click on any view (except wing sheets)
+            to place a damage marker.
           </p>
 
           <button className="sketch-generate-btn" onClick={generate} disabled={isGenerating}>
             {isGenerating ? "⏳ Rendering views…" : "⚙ Generate All Views"}
           </button>
 
-          {VIEWS.map(({ key, label, file }) => {
-            const img = images[key];
+          {VIEWS.map(({ key, label, file, clickable }) => {
+            const entry = viewsData[key];
+            // For clickable views, entry is ViewData | null; for wing sheets, it's string | null
+            const imgUrl = entry
+              ? typeof entry === "string" ? entry : entry.imageUrl
+              : null;
+            const vd = clickable && entry && typeof entry !== "string" ? entry : null;
             return (
               <div key={key} className="sketch-section">
                 <div className="sketch-section-header">
                   <span className="sketch-section-title">{label}</span>
-                  {img && (
+                  {imgUrl && (
                     <button
                       className="sketch-save-btn"
-                      onClick={() => savePng(img, file)}
+                      onClick={() => savePng(imgUrl, file)}
                       title={`Save ${label} as PNG`}
                     >
                       💾 PNG
@@ -684,8 +795,14 @@ export default function SketchViewer({ worldRef, markersRef }: SketchViewerProps
                   )}
                 </div>
                 <div className="sketch-image-container">
-                  {img ? (
-                    <img src={img} alt={label} className="sketch-image" />
+                  {imgUrl ? (
+                    <img
+                      src={imgUrl}
+                      alt={label}
+                      className="sketch-image"
+                      style={vd ? { cursor: "crosshair" } : undefined}
+                      onClick={vd ? (e) => handleSketchClick(e, vd) : undefined}
+                    />
                   ) : (
                     <div className="sketch-placeholder">
                       {isGenerating ? "Rendering…" : "Click Generate to render this view"}

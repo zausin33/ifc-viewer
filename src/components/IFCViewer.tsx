@@ -155,7 +155,7 @@ export default function IFCViewer() {
       />
 
       {/* Sketch views panel */}
-      <SketchViewer worldRef={worldRef} markersRef={markersRef} />
+      <SketchViewer worldRef={worldRef} fragmentsRef={fragmentsRef} markersRef={markersRef} />
 
       {loading && <div className="ifc-viewer-loading">Loading IFC model…</div>}
       {error && <div className="ifc-viewer-error">{error}</div>}
