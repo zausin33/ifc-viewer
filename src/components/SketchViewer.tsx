@@ -625,38 +625,26 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
     });
   }, [markersRef]);
 
-  // ── Click on a 2D sketch image → place marker in 3D ─────────────────────
-  const handleSketchClick = useCallback(async (
-    event: React.MouseEvent<HTMLImageElement>,
+  // ── Core: raycast with NDC + ViewData, place marker if hit ────────────────
+  const placeMarkerFromNDC = useCallback(async (
+    ndcX: number,
+    ndcY: number,
     vd: ViewData,
-  ) => {
+  ): Promise<boolean> => {
     const world = worldRef.current;
     const fragments = fragmentsRef.current;
-    if (!world?.renderer || !fragments) return;
+    if (!world?.renderer || !fragments) return false;
     const scene = world.scene.three;
     const dom = world.renderer.three.domElement;
 
-    const imgEl = event.currentTarget;
-    const imgRect = imgEl.getBoundingClientRect();
-
-    // Map display pixel → NDC in the view's orthographic camera space
-    const ndcX = ((event.clientX - imgRect.left) / imgRect.width) * 2 - 1;
-    const ndcY = -(((event.clientY - imgRect.top) / imgRect.height) * 2 - 1);
-
-    // The OBC fragment raycast API expects clientX/clientY screen coords + canvas DOM.
-    // It internally converts: ndc = ((clientX - rect.left) / rect.width) * 2 - 1, etc.
-    // So we reverse that to produce fake clientX/clientY that yield our desired NDC.
+    // Convert NDC to fake clientX/clientY for the OBC fragment raycast API
     const canvasRect = dom.getBoundingClientRect();
     const fakeClientX = canvasRect.left + ((ndcX + 1) / 2) * canvasRect.width;
     const fakeClientY = canvasRect.top + ((1 - ndcY) / 2) * canvasRect.height;
     const fakeMouse = new THREE.Vector2(fakeClientX, fakeClientY);
 
-    // For raycasting, reposition the camera just outside the clipping region.
-    // The OBC raycast returns only the CLOSEST hit. If the camera is far away
-    // and geometry outside the clipping region is between the camera and the
-    // subject, that geometry "blocks" the ray. By advancing the camera along
-    // its look direction past any clipping planes it sits on the rejected side
-    // of, the closest hit becomes one within the visible region.
+    // Reposition camera just outside the clipping region so the OBC raycast's
+    // "closest hit" is within the visible region.
     const rayCamera = vd.camera.clone();
     const lookDir = new THREE.Vector3();
     rayCamera.getWorldDirection(lookDir);
@@ -665,8 +653,6 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
       for (const plane of vd.clippingPlanes) {
         const dist = plane.distanceToPoint(rayCamera.position);
         if (dist < 0) {
-          // Camera is on the rejected side of this clipping plane.
-          // Compute shift along look direction to cross the plane.
           const denom = plane.normal.dot(lookDir);
           if (Math.abs(denom) > 0.001) {
             const shift = -dist / denom;
@@ -680,7 +666,6 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
       }
     }
 
-    // Raycast against all fragment models using the repositioned camera
     const results: Array<{ distance: number; point: THREE.Vector3 }> = [];
     for (const [, model] of fragments.list) {
       const result = await (model as unknown as FragmentModelLike).raycast({
@@ -691,17 +676,14 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
       if (result) results.push(result);
     }
 
-    if (results.length === 0) return;
+    if (results.length === 0) return false;
 
-    // Pick closest hit
     const closest = results.reduce((a, b) => (a.distance < b.distance ? a : b));
 
-    // Check clipping planes — reject if outside visible region
     for (const plane of vd.clippingPlanes) {
-      if (plane.distanceToPoint(closest.point) < 0) return;
+      if (plane.distanceToPoint(closest.point) < 0) return false;
     }
 
-    // Place marker
     const geo = new THREE.SphereGeometry(0.3, 16, 16);
     const mat = new THREE.MeshLambertMaterial({
       color: "#ff4444",
@@ -714,7 +696,84 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
     markersRef.current.push(sphere);
 
     await refreshMarkerOverlays();
+    return true;
   }, [worldRef, fragmentsRef, markersRef, refreshMarkerOverlays]);
+
+  // ── Click on a single-camera 2D sketch image ────────────────────────────
+  const handleSketchClick = useCallback(async (
+    event: React.MouseEvent<HTMLImageElement>,
+    vd: ViewData,
+  ) => {
+    const imgRect = event.currentTarget.getBoundingClientRect();
+    const ndcX = ((event.clientX - imgRect.left) / imgRect.width) * 2 - 1;
+    const ndcY = -(((event.clientY - imgRect.top) / imgRect.height) * 2 - 1);
+    await placeMarkerFromNDC(ndcX, ndcY, vd);
+  }, [placeMarkerFromNDC]);
+
+  // ── Click on a composite wing sheet → find which panel, then raycast ────
+  const handleWingClick = useCallback(async (
+    event: React.MouseEvent<HTMLImageElement>,
+    wingKey: "leftWing" | "rightWing",
+  ) => {
+    const wp = wingParamsRef.current;
+    if (!wp) return;
+
+    const isLeft = wingKey === "leftWing";
+    const panelKeys = isLeft ? wp.leftPanels : wp.rightPanels;
+    const worldWidths = isLeft ? wp.leftWidths : wp.rightWidths;
+    const mirrors = isLeft ? wp.leftMirrors : wp.rightMirrors;
+
+    // Recompute composite layout (same math as composeWing)
+    const totalWorld = worldWidths[0] + worldWidths[1] + worldWidths[2];
+    const panelWidths = worldWidths.map((w) => Math.round((w / totalWorld) * CAPTURE_W));
+    const panelHeights = panelWidths.map((pw) => Math.round((pw / CAPTURE_W) * CAPTURE_H));
+    const fullW = panelWidths[0] + panelWidths[1] + panelWidths[2];
+    const fullH = Math.max(...panelHeights);
+
+    // Map click to composite canvas coordinates
+    const imgRect = event.currentTarget.getBoundingClientRect();
+    const cx = ((event.clientX - imgRect.left) / imgRect.width) * fullW;
+    const cy = ((event.clientY - imgRect.top) / imgRect.height) * fullH;
+
+    // Determine which panel was clicked
+    let panelIdx = -1;
+    let panelStartX = 0;
+    for (let i = 0; i < 3; i++) {
+      if (cx < panelStartX + panelWidths[i]) {
+        panelIdx = i;
+        break;
+      }
+      panelStartX += panelWidths[i];
+    }
+    if (panelIdx === -1) return;
+
+    const pw = panelWidths[panelIdx];
+    const ph = panelHeights[panelIdx];
+    const yOffset = (fullH - ph) / 2;
+
+    // Check if click is within the panel's vertical bounds
+    if (cy < yOffset || cy > yOffset + ph) return;
+
+    // Panel-local coordinates
+    let localX = cx - panelStartX;
+    const localY = cy - yOffset;
+
+    // Undo mirror if this panel was flipped
+    if (mirrors[panelIdx]) {
+      localX = pw - localX;
+    }
+
+    // Map panel-local coords to NDC (panel was rendered at CAPTURE_W x CAPTURE_H)
+    const ndcX = (localX / pw) * 2 - 1;
+    const ndcY = -((localY / ph) * 2 - 1);
+
+    // Get the ViewData for this panel
+    const panelKey = panelKeys[panelIdx];
+    const panelVD = viewsData[panelKey] as ViewData | null;
+    if (!panelVD) return;
+
+    await placeMarkerFromNDC(ndcX, ndcY, panelVD);
+  }, [placeMarkerFromNDC, viewsData]);
 
   const savePng = (dataUrl: string, fileName: string) => {
     const a = document.createElement("a");
@@ -728,8 +787,8 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
     { key: "bottom", label: "Untersicht (Bottom View)", file: "untersicht.png", clickable: true },
     { key: "front", label: "Stirnwand – Vorderseite (Front Face)", file: "stirnwand-vorne.png", clickable: true },
     { key: "back", label: "Stirnwand – Rückseite (Back Face)", file: "stirnwand-hinten.png", clickable: true },
-    { key: "leftWing", label: "Linke Flügelwand – Abgewickelt (Left Wing Unfolded)", file: "fluegel-links.png", clickable: false },
-    { key: "rightWing", label: "Rechte Flügelwand – Abgewickelt (Right Wing Unfolded)", file: "fluegel-rechts.png", clickable: false },
+    { key: "leftWing", label: "Linke Flügelwand – Abgewickelt (Left Wing Unfolded)", file: "fluegel-links.png", clickable: true },
+    { key: "rightWing", label: "Rechte Flügelwand – Abgewickelt (Right Wing Unfolded)", file: "fluegel-rechts.png", clickable: true },
     { key: "leftFrontCrop", label: "Linke Flügelwand – Vorne (Left Wing Front Crop)", file: "fluegel-links-vorne.png", clickable: true },
     { key: "leftBackCrop", label: "Linke Flügelwand – Hinten (Left Wing Back Crop)", file: "fluegel-links-hinten.png", clickable: true },
     { key: "rightFrontCrop", label: "Rechte Flügelwand – Vorne (Right Wing Front Crop)", file: "fluegel-rechts-vorne.png", clickable: true },
@@ -775,11 +834,12 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
 
           {VIEWS.map(({ key, label, file, clickable }) => {
             const entry = viewsData[key];
-            // For clickable views, entry is ViewData | null; for wing sheets, it's string | null
             const imgUrl = entry
               ? typeof entry === "string" ? entry : entry.imageUrl
               : null;
-            const vd = clickable && entry && typeof entry !== "string" ? entry : null;
+            const isWing = key === "leftWing" || key === "rightWing";
+            const vd = clickable && !isWing && entry && typeof entry !== "string" ? entry : null;
+            const canClick = clickable && imgUrl;
             return (
               <div key={key} className="sketch-section">
                 <div className="sketch-section-header">
@@ -800,8 +860,14 @@ export default function SketchViewer({ worldRef, fragmentsRef, markersRef }: Ske
                       src={imgUrl}
                       alt={label}
                       className="sketch-image"
-                      style={vd ? { cursor: "crosshair" } : undefined}
-                      onClick={vd ? (e) => handleSketchClick(e, vd) : undefined}
+                      style={canClick ? { cursor: "crosshair" } : undefined}
+                      onClick={
+                        vd
+                          ? (e) => handleSketchClick(e, vd)
+                          : isWing && canClick
+                            ? (e) => handleWingClick(e, key as "leftWing" | "rightWing")
+                            : undefined
+                      }
                     />
                   ) : (
                     <div className="sketch-placeholder">
